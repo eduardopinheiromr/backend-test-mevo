@@ -6,9 +6,7 @@ import {
 } from "@nestjs/common";
 import { UploadService } from "./upload.service";
 import { FileInterceptor } from "@nestjs/platform-express";
-import { ApiConsumes } from "@nestjs/swagger";
-import { Readable } from "stream";
-import * as csv from "csv-parser";
+import { ApiBody, ApiConsumes } from "@nestjs/swagger";
 
 @Controller("upload")
 export class UploadController {
@@ -17,14 +15,18 @@ export class UploadController {
   @Post("csv")
   @UseInterceptors(FileInterceptor("file"))
   @ApiConsumes("multipart/form-data")
+  @ApiBody({
+    schema: {
+      type: "object",
+      properties: {
+        file: {
+          type: "string",
+          format: "binary",
+        },
+      },
+    },
+  })
   uploadFile(@UploadedFile() file: Express.Multer.File) {
-    console.log(file);
-    const stream = Readable.from(file.buffer);
-
-    let results: any[] = [];
-
-    stream.pipe(csv()).on("data", (data) => results.push(data));
-
-    console.log(results);
+    return this.uploadService.processFile(file);
   }
 }
