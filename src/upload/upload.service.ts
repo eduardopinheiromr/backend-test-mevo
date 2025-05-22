@@ -1,93 +1,28 @@
 import { Injectable } from "@nestjs/common";
-import { Readable } from "stream";
-import * as csv from "csv-parser";
-import { PrismaService } from "src/prisma.service";
-import { TransactionStatus } from "generated/prisma";
-
-type RawTransaction = {
-  from: string;
-  to: string;
-  amount: string;
-};
-
-type ParsedTransaction = {
-  from: string;
-  to: string;
-  amount: number;
-  suspicious?: boolean;
-};
-
-type InvalidTransaction = ParsedTransaction & {
-  reason: "NEGATIVE_AMOUNT" | "DUPLICATE";
-};
+import { PrismaService } from "../prisma.service";
+import { TransactionStatus } from "../../generated/prisma";
+import { TransactionValidatorService } from "./transaction-validator.service";
 
 @Injectable()
 export class UploadService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly validator: TransactionValidatorService,
+  ) {}
 
   async processFile(file: Express.Multer.File) {
-    const stream = Readable.from(file.buffer);
-
-    const validated: ParsedTransaction[] = [];
-    const invalid: InvalidTransaction[] = [];
-
-    const duplicates = new Set<string>();
-
-    const SUSPICIOUS_AMOUNT = 50_000_00;
-
-    await new Promise<void>((resolve, reject) => {
-      stream
-        .pipe(csv({ separator: ";" }))
-        .on("data", (row: RawTransaction) => {
-          const amount = Number(row.amount);
-          const suspicious = amount > SUSPICIOUS_AMOUNT;
-          const { from, to } = row;
-
-          const key = `${row.from}-${row.to}-${amount}`;
-
-          if (amount < 0) {
-            invalid.push({
-              from,
-              to,
-              amount,
-              reason: "NEGATIVE_AMOUNT",
-            });
-            return;
-          }
-
-          if (duplicates.has(key)) {
-            invalid.push({
-              from,
-              to,
-              amount,
-              suspicious,
-              reason: "DUPLICATE",
-            });
-            return;
-          }
-
-          duplicates.add(key);
-
-          validated.push({
-            from,
-            to,
-            amount,
-            suspicious,
-          });
-        })
-        .on("error", reject)
-        .on("end", resolve);
-    });
-
+    const { valid, invalid } = await this.validator.parseAndValidate(
+      file.buffer,
+    );
     const fileName = file.originalname;
 
     await this.prisma.transaction.createMany({
-      data: validated.map((t) => ({
+      data: valid.map((t) => ({
         ...t,
         status: TransactionStatus.VALID,
         suspicious: t.suspicious || false,
-        fileName,
         reason: null,
+        fileName,
       })),
     });
 
@@ -100,8 +35,8 @@ export class UploadService {
     });
 
     return {
-      inserted: validated.length,
-      suspicious: validated.filter((t) => t.suspicious).length,
+      inserted: valid.length,
+      suspicious: valid.filter((t) => t.suspicious).length,
       rejected: invalid.length,
       rejections: invalid,
     };
