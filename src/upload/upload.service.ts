@@ -15,10 +15,7 @@ type ParsedTransaction = {
   suspicious: boolean;
 };
 
-type InvalidTransaction = {
-  from: string;
-  to: string;
-  amount: number;
+type InvalidTransaction = Omit<ParsedTransaction, "suspicious"> & {
   reason: "NEGATIVE_AMOUNT" | "DUPLICATE";
 };
 
@@ -27,10 +24,10 @@ export class UploadService {
   async processFile(file: Express.Multer.File) {
     const stream = Readable.from(file.buffer);
 
-    const validatedTransactions: ParsedTransaction[] = [];
-    const invalidTransactions: InvalidTransaction[] = [];
+    const validated: ParsedTransaction[] = [];
+    const invalid: InvalidTransaction[] = [];
 
-    const duplicatesSet = new Set<string>();
+    const duplicates = new Set<string>();
 
     const SUSPICIOUS_AMOUNT = 50_000_00;
 
@@ -42,8 +39,9 @@ export class UploadService {
 
           const key = `${row.from}-${row.to}-${amount}`;
 
+          // 1. **Valores Negativos**: Operações com valores negativos são consideradas inválidas.
           if (amount < 0) {
-            invalidTransactions.push({
+            invalid.push({
               from: row.from,
               to: row.to,
               amount,
@@ -52,8 +50,9 @@ export class UploadService {
             return;
           }
 
-          if (duplicatesSet.has(key)) {
-            invalidTransactions.push({
+          // 2. **Operações Duplicadas**: Uma operação é duplicada se existir outra operação no arquivo com os mesmos valores de `to`, `from`, e `amount`. Tais operações são consideradas inválidas.
+          if (duplicates.has(key)) {
+            invalid.push({
               from: row.from,
               to: row.to,
               amount,
@@ -62,12 +61,13 @@ export class UploadService {
             return;
           }
 
-          duplicatesSet.add(key);
+          duplicates.add(key);
 
-          validatedTransactions.push({
+          validated.push({
             from: row.from,
             to: row.to,
             amount,
+            // 3. **Valores Suspeitos**: Operações com valores acima de R$50.000,00 são marcadas como suspeitas, mas ainda válidas para inclusão no banco de dados.
             suspicious: amount > SUSPICIOUS_AMOUNT,
           });
         })
@@ -76,10 +76,10 @@ export class UploadService {
     });
 
     return {
-      inserted: validatedTransactions.length,
-      suspicious: validatedTransactions.filter((t) => t.suspicious).length,
-      rejected: invalidTransactions.length,
-      rejections: invalidTransactions,
+      inserted: validated.length,
+      suspicious: validated.filter((t) => t.suspicious).length,
+      rejected: invalid.length,
+      rejections: invalid,
     };
   }
 }
