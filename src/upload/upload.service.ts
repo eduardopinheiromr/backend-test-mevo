@@ -1,6 +1,8 @@
 import { Injectable } from "@nestjs/common";
 import { Readable } from "stream";
 import * as csv from "csv-parser";
+import { PrismaService } from "src/prisma.service";
+import { TransactionStatus } from "generated/prisma";
 
 type RawTransaction = {
   from: string;
@@ -12,15 +14,17 @@ type ParsedTransaction = {
   from: string;
   to: string;
   amount: number;
-  suspicious: boolean;
+  suspicious?: boolean;
 };
 
-type InvalidTransaction = Omit<ParsedTransaction, "suspicious"> & {
+type InvalidTransaction = ParsedTransaction & {
   reason: "NEGATIVE_AMOUNT" | "DUPLICATE";
 };
 
 @Injectable()
 export class UploadService {
+  constructor(private readonly prisma: PrismaService) {}
+
   async processFile(file: Express.Multer.File) {
     const stream = Readable.from(file.buffer);
 
@@ -36,26 +40,27 @@ export class UploadService {
         .pipe(csv({ separator: ";" }))
         .on("data", (row: RawTransaction) => {
           const amount = Number(row.amount);
+          const suspicious = amount > SUSPICIOUS_AMOUNT;
+          const { from, to } = row;
 
           const key = `${row.from}-${row.to}-${amount}`;
 
-          // 1. **Valores Negativos**: Operações com valores negativos são consideradas inválidas.
           if (amount < 0) {
             invalid.push({
-              from: row.from,
-              to: row.to,
+              from,
+              to,
               amount,
               reason: "NEGATIVE_AMOUNT",
             });
             return;
           }
 
-          // 2. **Operações Duplicadas**: Uma operação é duplicada se existir outra operação no arquivo com os mesmos valores de `to`, `from`, e `amount`. Tais operações são consideradas inválidas.
           if (duplicates.has(key)) {
             invalid.push({
-              from: row.from,
-              to: row.to,
+              from,
+              to,
               amount,
+              suspicious,
               reason: "DUPLICATE",
             });
             return;
@@ -64,15 +69,34 @@ export class UploadService {
           duplicates.add(key);
 
           validated.push({
-            from: row.from,
-            to: row.to,
+            from,
+            to,
             amount,
-            // 3. **Valores Suspeitos**: Operações com valores acima de R$50.000,00 são marcadas como suspeitas, mas ainda válidas para inclusão no banco de dados.
-            suspicious: amount > SUSPICIOUS_AMOUNT,
+            suspicious,
           });
         })
         .on("error", reject)
         .on("end", resolve);
+    });
+
+    const fileName = file.originalname;
+
+    await this.prisma.transaction.createMany({
+      data: validated.map((t) => ({
+        ...t,
+        status: TransactionStatus.VALID,
+        suspicious: t.suspicious || false,
+        fileName,
+        reason: null,
+      })),
+    });
+
+    await this.prisma.transaction.createMany({
+      data: invalid.map((t) => ({
+        ...t,
+        status: TransactionStatus.INVALID,
+        fileName,
+      })),
     });
 
     return {
